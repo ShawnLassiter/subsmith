@@ -38,6 +38,7 @@ TF_CMD ?= tofu
 .PHONY: seed-hf-cache 
 .PHONY: tf-apply tf-destroy
 .PHONY: gen-ssh-cidrs pi-ssh rsync-pi-to-ec2
+.PHONY: scan-for-secrets
 
 help: ## List targets and usage
 	@printf "WhisperX workflow targets (override vars like REGION/TAG/ECR_REPO/DOCKERHUB_REPO on the CLI)\n\n"
@@ -162,3 +163,6 @@ rsync-pi-to-ec2: ## Rsync extracted audio from Pi to EC2 (set PI_HOST/PI_SRC/EC2
 	@test -n "$(EC2_HOST)" || { echo "Set EC2_HOST (or ensure ssh_target.txt exists)"; exit 1; }
 	@test -n "$(EC2_DEST)" || { echo "Set EC2_DEST"; exit 1; }
 	rsync -av --progress $(PI_SRC) $(EC2_HOST):$(EC2_DEST)
+
+scan-for-secrets: ## Run trufflehog against the git history (requires trufflehog installed)
+	trufflehog git file://$(PWD)
