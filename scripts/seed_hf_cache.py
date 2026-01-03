@@ -4,6 +4,7 @@ Seed a Hugging Face cache directory with common WhisperX models and optionally s
 Requires: huggingface_hub, awscli (for S3 sync), and valid HF token if models are gated.
 """
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,13 +47,17 @@ def main() -> int:
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensure WhisperX/HF honor the provided cache dir.
+    os.environ["HF_HOME"] = str(cache_dir)
+    os.environ["TRANSFORMERS_CACHE"] = str(cache_dir)
+
     for model in MODELS:
         print(f"Downloading {model} ...")
         snapshot_download(repo_id=model, cache_dir=str(cache_dir), local_dir_use_symlinks=False)
 
     for lang in ALIGN_LANGS:
         print(f"Prefetching align model for {lang} ...")
-        whisperx.load_align_model(language_code=lang, device="cpu", cache_dir=str(cache_dir))
+        whisperx.load_align_model(language_code=lang, device="cpu")
 
     if args.bucket:
         sync_to_s3(cache_dir, args.bucket, args.prefix)
