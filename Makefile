@@ -4,13 +4,12 @@
 # Makefile for WhisperX workflow (acts as living docs). Override vars on the CLI, e.g. make push REGION=us-west-2 TAG=latest
 
 REGION ?= us-east-1
-ECR_REPO ?= 000000000000.dkr.ecr.$(REGION).amazonaws.com/whisperx  # override with your account ID
-DOCKERHUB_REPO ?= docker.io/scraun/whisperx
-DOCKERHUB_USER ?= scraun
-DOCKERHUB_PASS ?=
+DOCKER_REPO ?= docker.io/youruser/subsmith  # registry/repo to build/push
+DOCKER_USER ?=
+DOCKER_PASS ?=
 PLATFORM ?= linux/amd64
 TAG ?= latest
-IMAGE ?= $(DOCKERHUB_REPO):$(TAG)
+IMAGE ?= $(DOCKER_REPO):$(TAG)
 AUDIO_DIR ?= audio
 OUT_DIR ?= srts
 ROOT ?= .
@@ -28,46 +27,37 @@ PI_HOST ?=
 PI_SRC ?= /home/pi/extracted_audio/
 EC2_DEST ?= /home/ec2-user/audio/
 EC2_HOST ?= $(shell if [ -f ssh_target.txt ]; then h=$$(cat ssh_target.txt); if echo $$h | grep -q '@'; then echo $$h; else echo ec2-user@$$h; fi; fi)
-ECR_REPO_NAME := $(shell echo $(ECR_REPO) | awk -F/ '{print $$NF}')
 TF_CMD ?= tofu
 
 .PHONY: help venv 
-.PHONY: login-ecr login-hub build push-ecr push-hub prune 
+.PHONY: login-docker build push prune 
 .PHONY: langs extract batch docker-batch 
-.PHONY: create-hf-bucket destroy-hf-bucket create-ecr destroy-ecr 
+.PHONY: create-hf-bucket destroy-hf-bucket 
 .PHONY: seed-hf-cache 
 .PHONY: tf-apply tf-destroy
 .PHONY: gen-ssh-cidrs pi-ssh rsync-pi-to-ec2
 .PHONY: scan-for-secrets
 
 help: ## List targets and usage
-	@printf "WhisperX workflow targets (override vars like REGION/TAG/ECR_REPO/DOCKERHUB_REPO on the CLI)\n\n"
+	@printf "WhisperX workflow targets (override vars like REGION/TAG/DOCKER_REPO on the CLI)\n\n"
 	@grep -E '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/: /' | column -s ':' -t
 
 venv: ## Reminder: activate local venv (uses venv310 by default)
 	@echo "Run: source venv310/bin/activate" && echo "If missing, create: python3 -m venv venv310 && source venv310/bin/activate"
 
-login-ecr: ## Log in to ECR (uses REGION/ECR_REPO)
-	aws ecr get-login-password --region $(REGION) | docker login --username AWS --password-stdin $(ECR_REPO)
-
-login-hub: ## Log in to Docker Hub (uses DOCKERHUB_USER/DOCKERHUB_PASS if set)
-	@if [ -n "$(DOCKERHUB_PASS)" ] && [ -n "$(DOCKERHUB_USER)" ]; then \
-		echo "$(DOCKERHUB_PASS)" | docker login --username $(DOCKERHUB_USER) --password-stdin; \
+login-docker: ## Log in to your registry (uses DOCKER_USER/DOCKER_PASS if set, else interactive)
+	@if [ -n "$(DOCKER_PASS)" ] && [ -n "$(DOCKER_USER)" ]; then \
+		echo "$(DOCKER_PASS)" | docker login --username $(DOCKER_USER) --password-stdin $(DOCKER_REGISTRY); \
 	else \
-		docker login; \
+		docker login $(DOCKER_REGISTRY); \
 	fi
 
-build: ## Build image and tag for ECR and Docker Hub
-	docker buildx build --squash --platform $(PLATFORM) --pull -t $(ECR_REPO):$(TAG) -t $(DOCKERHUB_REPO):$(TAG) .
+build: ## Build image and tag for the repo
+	docker buildx build --squash --platform $(PLATFORM) --pull -t $(DOCKER_REPO):$(TAG) .
 
-push-ecr: build login-ecr ## Push image to ECR (builds first)
-	docker push $(ECR_REPO):$(TAG)
-
-push-hub: build login-hub ## Push image to Docker Hub (builds first)
-	@if [ -z "$(DOCKERHUB_REPO)" ]; then echo "Set DOCKERHUB_REPO"; exit 1; fi
-	docker push $(DOCKERHUB_REPO):$(TAG)
-
-push: push-hub ## Alias: build + push to Docker Hub
+push: build login-docker ## Build and push to the repo
+	@if [ -z "$(DOCKER_REPO)" ]; then echo "Set DOCKER_REPO"; exit 1; fi
+	docker push $(DOCKER_REPO):$(TAG)
 
 prune: ## Prune dangling Docker images/containers
 	docker system prune -af
@@ -110,31 +100,18 @@ destroy-hf-bucket: ## Destroy HF cache bucket (force); set HF_BUCKET
 	aws s3 rb s3://$(HF_BUCKET) --force
 	@echo "Deleted bucket: $(HF_BUCKET)"
 
-create-ecr: ## Create ECR repo if missing (uses ECR_REPO/REGION)
-	@test -n "$(ECR_REPO_NAME)" || (echo "ECR_REPO_NAME is empty" && exit 1)
-	aws ecr describe-repositories --repository-names $(ECR_REPO_NAME) --region $(REGION) >/dev/null 2>&1 || \
-		aws ecr create-repository --repository-name $(ECR_REPO_NAME) --image-scanning-configuration scanOnPush=true --region $(REGION) >/dev/null
-	@echo "Repo ready: $(ECR_REPO)"
-
-destroy-ecr: ## Destroy ECR repo (force); uses ECR_REPO/REGION
-	@test -n "$(ECR_REPO_NAME)" || (echo "ECR_REPO_NAME is empty" && exit 1)
-	aws ecr delete-repository --repository-name $(ECR_REPO_NAME) --force --region $(REGION)
-	@echo "Deleted repo: $(ECR_REPO)"
-
 seed-hf-cache: ## Prefetch Whisper models + aligners into CACHE_DIR; optional sync to S3 (HF_BUCKET/PREFIX)
 	@test -n "$(HF_BUCKET)" || (echo "HF_BUCKET is required" && exit 1)
 	@if [ -n "$(PREFIX)" ]; then PREFIX_ARG="--prefix $(PREFIX)"; else PREFIX_ARG=""; fi; \
 	python3 scripts/seed_hf_cache.py --cache-dir $(CACHE_DIR) --bucket $(HF_BUCKET) $$PREFIX_ARG
 
-## runs tofu init then tofu apply with hf_cache_bucket, 
-## dockerhub_repo, and ecr_repo_url set from the Make vars, 
+## runs tofu init then tofu apply with hf_cache_bucket and docker_repo set from the Make vars,
 ## creating the VPC/SG/instance/IAM/etc. (ephemeral infra).
 tf-apply: 
 	$(TF_CMD) init
 	$(TF_CMD) apply -auto-approve \
 		-var "hf_cache_bucket=$(HF_BUCKET)" \
-		-var "dockerhub_repo=$(DOCKERHUB_REPO)" \
-		-var "ecr_repo_url=$(ECR_REPO)" \
+		-var "docker_repo=$(DOCKER_REPO)" \
 		-var "runtime_instance_type=$(RUNTIME_INSTANCE_TYPE)" \
 		-var "extra_ssh_cidrs=$(EXTRA_SSH_CIDRS)" \
 		-var "git_repo=$(GIT_REPO)" \

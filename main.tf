@@ -23,14 +23,8 @@ variable "hf_cache_bucket" {
   default     = "whisper-hf-cache-static"
 }
 
-variable "dockerhub_repo" {
-  description = "Docker Hub repository (e.g., docker.io/youruser/whisperx)"
-  type        = string
-  default     = ""
-}
-
-variable "ecr_repo_url" {
-  description = "Full ECR repository URL (e.g., 123456789012.dkr.ecr.us-east-1.amazonaws.com/whisperx). Leave blank if using Docker Hub."
+variable "docker_repo" {
+  description = "Container repository URL (Docker Hub/ECR/etc), e.g., docker.io/youruser/subsmith or 123456789012.dkr.ecr.us-east-1.amazonaws.com/subsmith"
   type        = string
   default     = ""
 }
@@ -265,13 +259,12 @@ resource "aws_instance" "whisper_box" {
                 sudo -u ec2-user aws s3 sync s3://${var.hf_cache_bucket}/ /opt/hf-cache || true
               fi
 
-              if [ -n "${var.dockerhub_repo}" ]; then
-                docker pull ${var.dockerhub_repo}:latest
-                docker tag ${var.dockerhub_repo}:latest whisperx:latest
-              elif [ -n "${var.ecr_repo_url}" ]; then
-                aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${var.ecr_repo_url}
-                docker pull ${var.ecr_repo_url}:latest
-                docker tag ${var.ecr_repo_url}:latest whisperx:latest
+              if [ -n "${var.docker_repo}" ]; then
+                if echo ${var.docker_repo} | grep -q "amazonaws.com"; then
+                  aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${var.docker_repo}
+                fi
+                docker pull ${var.docker_repo}:latest
+                docker tag ${var.docker_repo}:latest whisperx:latest
               fi
 
               if [ -n "${var.git_repo}" ]; then
