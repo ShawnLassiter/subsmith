@@ -29,9 +29,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         "wheel==0.43.0" \
         "filelock==3.20.1"
 
-# CUDA 12.4 wheels for torch/torchaudio
+# CUDA 12.4 wheels for torch/torchaudio (CVE-2025-32434 mitigation via torch >= 2.6)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124 \
+    pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
     && pip install --no-cache-dir --no-deps git+https://github.com/m-bain/whisperx.git hf-transfer
 
 
