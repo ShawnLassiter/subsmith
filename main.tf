@@ -23,6 +23,12 @@ variable "hf_cache_bucket" {
   default     = "whisper-hf-cache-static"
 }
 
+variable "audio_bucket" {
+  description = "Optional S3 bucket name for input/output audio sync"
+  type        = string
+  default     = ""
+}
+
 variable "docker_repo" {
   description = "Container repository URL (Docker Hub/ECR/etc), e.g., docker.io/youruser/subsmith or 123456789012.dkr.ecr.us-east-1.amazonaws.com/subsmith"
   type        = string
@@ -152,6 +158,11 @@ locals {
 
   instance_type  = var.runtime_instance_type
 
+  audio_bucket_arns = var.audio_bucket != "" ? [
+    "arn:aws:s3:::${var.audio_bucket}",
+    "arn:aws:s3:::${var.audio_bucket}/*"
+  ] : []
+
   g6_azs      = data.aws_ec2_instance_type_offerings.g6.locations
   selected_az = length(local.g6_azs) > 0 ? local.g6_azs[0] : data.aws_availability_zones.available.names[0]
 }
@@ -209,10 +220,13 @@ data "aws_iam_policy_document" "s3_cache" {
       "s3:ListBucket"
     ]
 
-    resources = [
-      "arn:aws:s3:::${var.hf_cache_bucket}",
-      "arn:aws:s3:::${var.hf_cache_bucket}/*"
-    ]
+    resources = concat(
+      [
+        "arn:aws:s3:::${var.hf_cache_bucket}",
+        "arn:aws:s3:::${var.hf_cache_bucket}/*"
+      ],
+      local.audio_bucket_arns
+    )
   }
 }
 
@@ -241,7 +255,7 @@ resource "aws_instance" "whisper_box" {
   }
 
   root_block_device {
-    volume_size           = 50
+    volume_size           = 80
     volume_type           = "gp3"
     delete_on_termination = true
   }
@@ -250,13 +264,31 @@ resource "aws_instance" "whisper_box" {
   # --- INSTALLATION SCRIPT ---
   user_data = <<-EOF
               #!/bin/bash -xe
+              yum install -y git awscli
               systemctl enable --now docker
 
               mkdir -p /opt/hf-cache
               chown ec2-user:ec2-user /opt/hf-cache
 
+              mkdir -p /opt/audio
+              chown ec2-user:ec2-user /opt/audio
+
+              SYNC_LOG=/var/log/s3-sync.log
+              echo "Starting S3 pre-sync at $(date)" | tee -a "$SYNC_LOG"
+
+              # Restore HF cache via tarball if present to preserve deduplication
               if [ -n "${var.hf_cache_bucket}" ]; then
-                sudo -u ec2-user aws s3 sync s3://${var.hf_cache_bucket}/ /opt/hf-cache || true
+                if sudo -u ec2-user aws s3 cp s3://${var.hf_cache_bucket}/hf-cache.tar.gz /tmp/hf-cache.tar.gz 2>&1 | tee -a "$SYNC_LOG"; then
+                  sudo -u ec2-user rm -rf /opt/hf-cache/*
+                  sudo -u ec2-user tar -xzf /tmp/hf-cache.tar.gz -C /opt/hf-cache
+                  sudo -u ec2-user rm -f /tmp/hf-cache.tar.gz
+                else
+                  sudo -u ec2-user aws s3 sync s3://${var.hf_cache_bucket}/ /opt/hf-cache 2>&1 | tee -a "$SYNC_LOG" || true
+                fi
+              fi
+
+              if [ -n "${var.audio_bucket}" ]; then
+                sudo -u ec2-user aws s3 sync s3://${var.audio_bucket}/ /opt/audio 2>&1 | tee -a "$SYNC_LOG" || true
               fi
 
               if [ -n "${var.docker_repo}" ]; then
@@ -273,32 +305,35 @@ resource "aws_instance" "whisper_box" {
                     cd /home/ec2-user/subs && git fetch --all && git reset --hard origin/${var.git_branch}; \
                   else \
                     git clone --branch ${var.git_branch} ${var.git_repo} /home/ec2-user/subs; \
-                  fi"
+                  fi" || true
               fi
 
-              cat >/usr/local/bin/sync_hf_cache.sh <<'EOSYNC'
+              cat >/usr/local/bin/sync_s3_data.sh <<'EOSYNC'
               #!/bin/bash
               if [ -n "${var.hf_cache_bucket}" ]; then
-                aws s3 sync /opt/hf-cache s3://${var.hf_cache_bucket}/ || true
+                tar -czf /tmp/hf-cache.tar.gz -C /opt/hf-cache . && aws s3 cp /tmp/hf-cache.tar.gz s3://${var.hf_cache_bucket}/hf-cache.tar.gz && rm -f /tmp/hf-cache.tar.gz || true
+              fi
+              if [ -n "${var.audio_bucket}" ]; then
+                aws s3 sync /opt/audio s3://${var.audio_bucket}/ || true
               fi
               EOSYNC
-              chmod +x /usr/local/bin/sync_hf_cache.sh
+              chmod +x /usr/local/bin/sync_s3_data.sh
 
-              cat >/etc/systemd/system/hf-cache-sync.service <<'EOSVC'
+              cat >/etc/systemd/system/s3-data-sync.service <<'EOSVC'
               [Unit]
-              Description=Sync HF cache to S3 on shutdown
+              Description=Sync HF cache and audio to S3 on shutdown
               DefaultDependencies=no
               Before=shutdown.target
 
               [Service]
               Type=oneshot
-              ExecStart=/usr/local/bin/sync_hf_cache.sh
+              ExecStart=/usr/local/bin/sync_s3_data.sh
 
               [Install]
               WantedBy=multi-user.target
               EOSVC
 
-              systemctl enable hf-cache-sync.service
+              systemctl enable s3-data-sync.service
 
               touch /home/ec2-user/install_complete
               chown ec2-user:ec2-user /home/ec2-user/install_complete
@@ -323,18 +358,6 @@ resource "aws_instance" "whisper_box" {
   }
 }
 
-# --- 4b. GOLDEN AMI FROM BUILT INSTANCE ---
-resource "aws_ami_from_instance" "whisper_golden" {
-  # Run `tofu apply -target=aws_ami_from_instance.whisper_golden` after the box is fully provisioned.
-  name                    = "whisper-g6-${formatdate("YYYYMMDD-hhmm", timestamp())}"
-  source_instance_id      = aws_instance.whisper_box.id
-  snapshot_without_reboot = true
-
-  tags = {
-    Name = "whisper-g6-golden"
-  }
-}
-
 # Persist the SSH target for downstream tools
 resource "local_file" "ssh_target" {
   content  = "ubuntu@${aws_instance.whisper_box.public_dns}"
@@ -351,16 +374,12 @@ output "upload_command" {
 }
 
 output "run_command" {
-  value = "docker run --gpus all --rm -v /opt/hf-cache:/opt/hf-cache -v /home/ec2-user:/data whisperx:latest /data/YOUR_FILE.mka --model large-v2 --compute_type float16 --device cuda"
-}
-
-output "golden_ami_id" {
-  value = aws_ami_from_instance.whisper_golden.id
+  value = "docker run --gpus all --rm -v /opt/hf-cache:/opt/hf-cache -v /opt/audio:/audio -v /home/ec2-user:/data whisperx:latest /data/YOUR_FILE.mka --model large-v2 --compute_type float16 --device cuda"
 }
 
 # Plan-time note (static text shown in plan) and post-apply summary
 output "plan_note" {
-  value = "Plan note: creates network, SG, g6.xlarge worker using baked AMI if present (fallback to DLAMI), writes ssh_target.txt, can bake a golden AMI."
+  value = "Plan note: creates network, SG, g6.xlarge worker using baked AMI if present (fallback to DLAMI), writes ssh_target.txt."
 }
 
 output "usage_summary" {
@@ -369,8 +388,7 @@ output "usage_summary" {
           1) SSH: ssh -i ~/.ssh/id_rsa ec2-user@${aws_instance.whisper_box.public_dns}
           2) Upload: scp -i ~/.ssh/id_rsa YOUR_FILE.mp3 ec2-user@${aws_instance.whisper_box.public_dns}:/home/ec2-user/
           3) Run: /home/ubuntu/venv/bin/insanely-fast-whisper --file-name YOUR_FILE.mp3 --model-name openai/whisper-large-v3 --batch-size 1 --flash true --timestamp chunk --transcript-path output.txt
-          4) Bake AMI (when ready): tofu apply -target=aws_ami_from_instance.whisper_golden
-          5) Override AMI (optional): set override_ami_id; otherwise uses latest baked or DLAMI
-          6) ssh_target file: cat ${path.module}/ssh_target.txt
+          4) Override AMI (optional): set override_ami_id; otherwise uses latest baked or DLAMI
+          5) ssh_target file: cat ${path.module}/ssh_target.txt
           EON
 }

@@ -14,6 +14,7 @@ AUDIO_DIR ?= audio
 OUT_DIR ?= srts
 ROOT ?= .
 HF_BUCKET ?= whisper-hf-cache-static
+AUDIO_BUCKET ?=
 CACHE_DIR ?= ./hf-cache
 PREFIX ?=
 ASR_MODEL ?= large-v3-turbo
@@ -75,13 +76,14 @@ batch: ## Run WhisperX locally over AUDIO_DIR/*.mka into OUT_DIR (CPU/GPU as ava
 		python3 scripts/run_whisperx.py "$$f" --model $(ASR_MODEL) --batch-size $(ASR_BATCH_SIZE) --output $(OUT_DIR)/$$(basename "$${f%.*}").srt; \
 	done
 
-docker-batch: ## Run WhisperX in container on GPU host (mount /media and /opt/hf-cache)
-	for f in /media/*.mka; do \
+docker-batch: ## Run WhisperX in container on GPU host (mount /media, /opt/audio, /opt/hf-cache)
+	for f in /opt/audio/*.mka /media/*.mka; do \
 		[ -f "$$f" ] || continue; \
 		docker run --gpus all --rm \
 			-v /opt/hf-cache:/opt/hf-cache \
+			-v /opt/audio:/audio \
 			-v /media:/media \
-			$(IMAGE) "$$f" --model $(ASR_MODEL) --batch-size $(ASR_BATCH_SIZE) --compute_type float16 --device cuda; \
+			$(IMAGE) "$$f" --model $(ASR_MODEL) --batch_size $(ASR_BATCH_SIZE) --compute_type float16 --device cuda; \
 	done
 
 create-hf-bucket: ## Create HF cache bucket (blocks public access, AES256 SSE); set HF_BUCKET/REGION
@@ -111,6 +113,7 @@ tf-apply:
 	$(TF_CMD) init
 	$(TF_CMD) apply -auto-approve \
 		-var "hf_cache_bucket=$(HF_BUCKET)" \
+		-var "audio_bucket=$(AUDIO_BUCKET)" \
 		-var "docker_repo=$(DOCKER_REPO)" \
 		-var "runtime_instance_type=$(RUNTIME_INSTANCE_TYPE)" \
 		-var "extra_ssh_cidrs=$(EXTRA_SSH_CIDRS)" \

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Seed a Hugging Face cache directory with common WhisperX models and optionally sync to S3.
-Requires: huggingface_hub, awscli (for S3 sync), and valid HF token if models are gated.
+Seed a Hugging Face cache directory with common WhisperX models and optionally upload a tarball to S3.
+Requires: huggingface_hub, awscli (for S3 upload), and valid HF token if models are gated.
 """
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +14,7 @@ from huggingface_hub import snapshot_download
 import whisperx
 
 MODELS = [
-    "openai/whisper-large-v3",
+    # "openai/whisper-large-v3",
     "openai/whisper-large-v3-turbo",
 ]
 
@@ -36,10 +37,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def sync_to_s3(cache_dir: Path, bucket: str, prefix: str) -> None:
-    target = f"s3://{bucket}/" if not prefix else f"s3://{bucket}/{prefix.rstrip('/')}/"
-    print(f"Syncing {cache_dir} to {target} ...")
-    subprocess.run(["aws", "s3", "sync", str(cache_dir), target], check=True)
+def upload_tar_to_s3(cache_dir: Path, bucket: str, prefix: str) -> None:
+    target = f"s3://{bucket}/hf-cache.tar.gz" if not prefix else f"s3://{bucket}/{prefix.rstrip('/')}/hf-cache.tar.gz"
+    tar_path = cache_dir.parent / "hf-cache.tar.gz"
+    print(f"Creating tarball {tar_path} from {cache_dir} ...")
+    tar_bin = "gtar" if shutil.which("gtar") else "tar"
+    tar_cmd = [tar_bin]
+    if tar_bin == "gtar":
+        tar_cmd += ["--checkpoint=10000", "--checkpoint-action=dot"]
+    tar_cmd += ["-czf", str(tar_path), "-C", str(cache_dir), "."]
+    subprocess.run(tar_cmd, check=True)
+    print(f"Uploading tarball to {target} ...")
+    subprocess.run(["aws", "s3", "cp", str(tar_path), target], check=True)
 
 
 def main() -> int:
@@ -60,7 +69,7 @@ def main() -> int:
         whisperx.load_align_model(language_code=lang, device="cpu")
 
     if args.bucket:
-        sync_to_s3(cache_dir, args.bucket, args.prefix)
+        upload_tar_to_s3(cache_dir, args.bucket, args.prefix)
 
     print("Done.")
     return 0
