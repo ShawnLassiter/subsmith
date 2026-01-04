@@ -4,7 +4,7 @@
 # Makefile for WhisperX workflow (acts as living docs). Override vars on the CLI, e.g. make push REGION=us-west-2 TAG=latest
 
 REGION ?= us-east-1
-DOCKER_REPO ?= docker.io/youruser/subsmith  # registry/repo to build/push
+DOCKER_REPO ?= docker.io/scraun/subsmith
 DOCKER_USER ?=
 DOCKER_PASS ?=
 PLATFORM ?= linux/amd64
@@ -76,14 +76,18 @@ batch: ## Run WhisperX locally over AUDIO_DIR/*.mka into OUT_DIR (CPU/GPU as ava
 		python3 scripts/run_whisperx.py "$$f" --model $(ASR_MODEL) --batch-size $(ASR_BATCH_SIZE) --output $(OUT_DIR)/$$(basename "$${f%.*}").srt; \
 	done
 
-docker-batch: ## Run WhisperX in container on GPU host (mount /media, /opt/audio, /opt/hf-cache)
-	for f in /opt/audio/*.mka /media/*.mka; do \
+docker-batch: ## Run WhisperX in container on GPU host (uses /opt/hf-cache for reuse)
+	for f in /opt/audio/*.mka; do \
 		[ -f "$$f" ] || continue; \
 		docker run --gpus all --rm \
+			-e HF_HOME=/opt/hf-cache/hf \
+			-e TRANSFORMERS_CACHE=/opt/hf-cache/hf \
+			-e TORCH_HOME=/opt/hf-cache/torch \
+			-e XDG_CACHE_HOME=/opt/hf-cache/xdg \
 			-v /opt/hf-cache:/opt/hf-cache \
-			-v /opt/audio:/audio \
+			-v /opt/audio:/opt/audio \
 			-v /media:/media \
-			$(IMAGE) "$$f" --model $(ASR_MODEL) --batch_size $(ASR_BATCH_SIZE) --compute_type float16 --device cuda; \
+			$(IMAGE) "$$f" --output_dir /opt/audio/ --model $(ASR_MODEL) --batch_size $(ASR_BATCH_SIZE) --compute_type float16 --device cuda --vad_method silero; \
 	done
 
 create-hf-bucket: ## Create HF cache bucket (blocks public access, AES256 SSE); set HF_BUCKET/REGION

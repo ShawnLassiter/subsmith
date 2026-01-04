@@ -30,7 +30,7 @@ variable "audio_bucket" {
 }
 
 variable "docker_repo" {
-  description = "Container repository URL (Docker Hub/ECR/etc), e.g., docker.io/youruser/subsmith or 123456789012.dkr.ecr.us-east-1.amazonaws.com/subsmith"
+  description = "Container repository URL (Docker Hub/ECR/etc), e.g., docker.io/ShawnLassiter/subsmith or 123456789012.dkr.ecr.us-east-1.amazonaws.com/subsmith"
   type        = string
   default     = ""
 }
@@ -296,7 +296,6 @@ resource "aws_instance" "whisper_box" {
                   aws ecr get-login-password --region ${data.aws_region.current.name} | docker login --username AWS --password-stdin ${var.docker_repo}
                 fi
                 docker pull ${var.docker_repo}:latest
-                docker tag ${var.docker_repo}:latest whisperx:latest
               fi
 
               if [ -n "${var.git_repo}" ]; then
