@@ -27,7 +27,17 @@ REMOTE_IP_HOSTS ?=
 PI_HOST ?=
 PI_SRC ?= /home/pi/extracted_audio/
 EC2_DEST ?= /home/ec2-user/audio/
-EC2_HOST ?= $(shell if [ -f ssh_target.txt ]; then h=$$(cat ssh_target.txt); if echo $$h | grep -q '@'; then echo $$h; else echo ec2-user@$$h; fi; fi)
+EC2_NAME ?= whisperx-runtime
+EC2_HOST ?= $(shell \
+	if [ -f ssh_target.txt ]; then \
+		h=$$(cat ssh_target.txt); \
+		if echo $$h | grep -q '@'; then echo $$h; else echo ec2-user@$$h; fi; \
+	elif command -v aws >/dev/null 2>&1; then \
+		dns=$$(aws ec2 describe-instances \
+			--filters "Name=tag:Name,Values=$(EC2_NAME)" "Name=instance-state-name,Values=running" \
+			--query "Reservations[0].Instances[0].PublicDnsName" --output text 2>/dev/null); \
+		if [ "$$dns" != "None" ] && [ -n "$$dns" ]; then echo ec2-user@$$dns; fi; \
+	fi)
 TF_CMD ?= tofu
 
 .PHONY: help venv 
@@ -37,6 +47,7 @@ TF_CMD ?= tofu
 .PHONY: seed-hf-cache 
 .PHONY: tf-apply tf-destroy
 .PHONY: gen-ssh-cidrs pi-ssh rsync-pi-to-ec2
+.PHONY: rsync-srts
 .PHONY: scan-for-secrets
 
 help: ## List targets and usage
@@ -150,6 +161,11 @@ rsync-pi-to-ec2: ## Rsync extracted audio from Pi to EC2 (set PI_HOST/PI_SRC/EC2
 	@test -n "$(EC2_HOST)" || { echo "Set EC2_HOST (or ensure ssh_target.txt exists)"; exit 1; }
 	@test -n "$(EC2_DEST)" || { echo "Set EC2_DEST"; exit 1; }
 	rsync -av --progress $(PI_SRC) $(EC2_HOST):$(EC2_DEST)
+
+rsync-srts: ## Rsync SRTs from EC2 host /opt/audio -> ./srts (uses EC2_HOST or ssh_target.txt)
+	@test -n "$(EC2_HOST)" || { echo "Set EC2_HOST or create ssh_target.txt"; exit 1; }
+	@mkdir -p $(OUT_DIR)
+	rsync -av --include='*.srt' --include='*/' --exclude='*' $(EC2_HOST):/opt/audio/ $(OUT_DIR)/
 
 scan-for-secrets: ## Run trufflehog against the git history (requires trufflehog installed)
 	trufflehog git file://$(PWD)
