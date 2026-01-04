@@ -16,6 +16,7 @@ def write_srt(segments, path: Path) -> None:
         lines.append(f"{format_ts(start)} --> {format_ts(end)}")
         lines.append(text)
         lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n")
 
 
@@ -95,11 +96,18 @@ def pick_device_and_compute_type(args: argparse.Namespace) -> tuple[str, str]:
 
 def main() -> None:
     args = parse_args()
+    inp_path = args.input.resolve()
+    out_path = (args.output.resolve() if args.output else inp_path.with_suffix(".whisperx.srt"))
+
+    if out_path.exists():
+        print(f"Skipping {inp_path} because output already exists: {out_path}")
+        return
+
     device, compute_type = pick_device_and_compute_type(args)
 
     print(f"Device: {device}, compute_type: {compute_type}")
     model = whisperx.load_model(args.model, device, compute_type=compute_type)
-    audio = whisperx.load_audio(str(args.input))
+    audio = whisperx.load_audio(str(inp_path))
     result = model.transcribe(audio, batch_size=args.batch_size)
 
     align_model, metadata = whisperx.load_align_model(
@@ -109,7 +117,6 @@ def main() -> None:
         result["segments"], align_model, metadata, audio, device, return_char_alignments=False
     )
 
-    out_path = args.output or args.input.with_suffix(".whisperx.srt")
     write_srt(aligned["segments"], out_path)
     print(f"Wrote {out_path}")
 

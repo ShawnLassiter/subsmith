@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Seed a Hugging Face cache directory with common WhisperX models and optionally upload a tarball to S3.
-Requires: huggingface_hub, awscli (for S3 upload), and valid HF token if models are gated.
+Also prefetch torch-hub assets (Silero VAD zip + wav2vec2 fr alignment) to avoid cold-start downloads.
+Requires: huggingface_hub, torch, awscli (for S3 upload), and valid HF token if models are gated.
 """
 import argparse
 import os
@@ -11,6 +12,7 @@ import sys
 from pathlib import Path
 
 from huggingface_hub import snapshot_download
+import torch
 import whisperx
 
 MODELS = [
@@ -37,6 +39,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def download_torch_asset(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        print(f"Already have {dest}, skipping")
+        return
+    print(f"Downloading {url} -> {dest}")
+    torch.hub.download_url_to_file(url, str(dest), progress=True)
+
+
 def upload_tar_to_s3(cache_dir: Path, bucket: str, prefix: str) -> None:
     target = f"s3://{bucket}/hf-cache.tar.gz" if not prefix else f"s3://{bucket}/{prefix.rstrip('/')}/hf-cache.tar.gz"
     tar_path = cache_dir.parent / "hf-cache.tar.gz"
@@ -59,6 +70,9 @@ def main() -> int:
     # Ensure WhisperX/HF honor the provided cache dir.
     os.environ["HF_HOME"] = str(cache_dir)
     os.environ["TRANSFORMERS_CACHE"] = str(cache_dir)
+    torch_home = cache_dir / "torch"
+    os.environ["TORCH_HOME"] = str(torch_home)
+    os.environ["XDG_CACHE_HOME"] = str(cache_dir / "xdg")
 
     for model in MODELS:
         print(f"Downloading {model} ...")
@@ -67,6 +81,16 @@ def main() -> int:
     for lang in ALIGN_LANGS:
         print(f"Prefetching align model for {lang} ...")
         whisperx.load_align_model(language_code=lang, device="cpu")
+
+    # Torch hub assets (Silero VAD + wav2vec2 fr checkpoint used by aligner)
+    download_torch_asset(
+        "https://github.com/snakers4/silero-vad/zipball/master",
+        torch_home / "hub" / "master.zip",
+    )
+    download_torch_asset(
+        "https://download.pytorch.org/torchaudio/models/wav2vec2_voxpopuli_base_10k_asr_fr.pt",
+        torch_home / "hub" / "checkpoints" / "wav2vec2_voxpopuli_base_10k_asr_fr.pt",
+    )
 
     if args.bucket:
         upload_tar_to_s3(cache_dir, args.bucket, args.prefix)
